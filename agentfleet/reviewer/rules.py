@@ -55,6 +55,9 @@ _TEST_DEF = re.compile(r"^\s*(?:async\s+)?def\s+(test_\w+)|^\s*(?:it|test)\(\s*[
 _ASSERT = re.compile(r"^\s*(assert\b|self\.assert\w*\(|expect\(|pytest\.raises\()")
 _SKIP = re.compile(r"@pytest\.mark\.(skip|xfail)\b|pytest\.skip\(|unittest\.skip|\.skip\(|xit\(|@skip\b")
 _TRIVIAL_ASSERT = re.compile(r"^\s*assert\s+(True|1|not\s+False)\s*(#.*)?$|^\s*assert\s+(\w+)\s*==\s*\3\s*$")
+# `assert f(x) == 4` replaced by `assert f(x) >= 0` / `is not None` / `!= ...` on the same left-hand side.
+_STRICT_ASSERT = re.compile(r"^\s*assert\s+(.+?)\s*==\s*.+$")
+_LOOSE_ASSERT = re.compile(r"^\s*assert\s+(.+?)\s*(?:>=|<=|>|<|!=|is\s+not\s+None|is\s+not|\bin\b)\s*.*$")
 _EXCEPT_SWALLOW = re.compile(r"^\s*except(\s+Exception|\s+BaseException)?\s*:\s*(pass)?\s*$")
 
 
@@ -100,6 +103,11 @@ def rule_weakened_assertions(files: list[FileDiff], ctx: ReviewContext) -> Itera
                 yield Finding("weakened-assertion", "high", f.path, f"trivial assertion: {l.text.strip()}", l.new_lineno)
             elif _EXCEPT_SWALLOW.match(l.text):
                 yield Finding("weakened-assertion", "medium", f.path, "exception swallowed inside a test", l.new_lineno)
+        strict = {m.group(1).strip(): l for l in f.removed if (m := _STRICT_ASSERT.match(l.text))}
+        for l in f.added:
+            m = _LOOSE_ASSERT.match(l.text)
+            if m and m.group(1).strip() in strict:
+                yield Finding("weakened-assertion", "high", f.path, f"assertion loosened: {strict[m.group(1).strip()].text.strip()} -> {l.text.strip()}", l.new_lineno)
         rem = sum(1 for l in f.removed if _ASSERT.match(l.text))
         add = sum(1 for l in f.added if _ASSERT.match(l.text))
         # Removing assertions without adding as many, beyond what deleted tests explain.
@@ -117,14 +125,20 @@ _NETWORK = [
     (re.compile(r"\bsocket\.(socket|create_connection)\("), "socket"),
     (re.compile(r"\baiohttp\.(ClientSession|request)\b"), "aiohttp"),
     (re.compile(r"\b(curl|wget)\s+(-\S+\s+)*['\"]?https?://"), "curl/wget"),
+    (re.compile(r"""['"](curl|wget|nc|ssh|scp)['"]\s*,"""), "curl/wget via subprocess"),
     (re.compile(r"\bfetch\(\s*['\"`]https?://"), "fetch"),
     (re.compile(r"\b(smtplib\.SMTP|ftplib\.FTP|paramiko\.SSHClient)\b"), "remote protocol"),
 ]
 _NET_IMPORT = re.compile(r"^\s*(import|from)\s+(requests|httpx|aiohttp|urllib3|socket|paramiko|websockets?)\b")
 
 
+_DOC_EXT = (".md", ".rst", ".txt", ".adoc")
+
+
 def rule_network_calls(files: list[FileDiff], ctx: ReviewContext) -> Iterable[Finding]:
     for f in files:
+        if f.path.endswith(_DOC_EXT) or f.path.startswith("docs/"):
+            continue  # prose and examples do not execute
         removed_text = {l.text.strip() for l in f.removed}
         for l in f.added:
             if l.text.strip() in removed_text:
@@ -142,12 +156,12 @@ def rule_network_calls(files: list[FileDiff], ctx: ReviewContext) -> Iterable[Fi
 
 
 _SECRETS = [
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key id"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "cloud access key id (AKIA...)"),
     (re.compile(r"-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY"), "private key"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"), "GitHub token"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"), "git host token (ghp_...)"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "API secret key"),
-    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "Slack token"),
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "Google API key"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "chat bot token (xox...)"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "cloud API key (AIza...)"),
     (re.compile(r"(?i)\b[a-z0-9_]*(api[_-]?key|secret|password|passwd|token|auth)[a-z0-9_]*\s*[:=]\s*['\"][^'\"\s]{8,}['\"]"), "hard-coded credential"),
     (re.compile(r"(?i)\b(postgres|mysql|mongodb(\+srv)?|redis|amqp)://[^:\s/]+:[^@\s]+@"), "credentials in connection URL"),
 ]

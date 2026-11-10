@@ -17,7 +17,7 @@ class Task:
     status: str = "queued"  # queued|running|awaiting_review|approved|merged|failed|discarded
     logs: list[str] = field(default_factory=list)
     verdict: dict | None = None
-    branch: str = ""; worktree: str = ""; error: str = ""
+    branch: str = ""; worktree: str = ""; error: str = ""; sandbox: str = ""
 
 class Fleet:
     def __init__(self, repo, sandbox_kind="auto", limits=None, reviewer=None):
@@ -34,8 +34,8 @@ class Fleet:
             task.branch, task.worktree = wt.branch, str(wt.path)
             inv = load_agent(task.agent).invocation(task.id, task.prompt)
             sb = get_sandbox(self.sandbox_kind, self.limits)
-            r = sb.run(inv.cmd, cwd=wt.path, env=inv.env, on_line=lambda l: task.logs.append(l))
-            task.logs.append(r.output if not task.logs else "")
+            task.sandbox = sb.name
+            r = sb.run(inv.cmd, cwd=wt.path, env=inv.env, on_line=task.logs.append)
             if not r.ok: task.status, task.error = "failed", f"agent exit {r.returncode}"; return task
             self.wm.commit_all(wt, f"agent({task.id}): {task.prompt[:60]}")
             v = self.reviewer.review(self.wm.diff(wt)); task.verdict = v.to_dict()
@@ -47,6 +47,7 @@ class Fleet:
         with ThreadPoolExecutor(max_workers=workers) as ex: return list(ex.map(self.run, tasks))
     def approve(self, tid):
         t = self.tasks[tid]
+        if t.status != "awaiting_review": raise ValueError(f"task is {t.status}, not awaiting_review")
         if t.verdict and t.verdict["blocked"]: raise ValueError("review blocked: high-severity findings")
         self.wm.merge(self._wts[tid]); t.status = "merged"; return t
     def discard(self, tid):
